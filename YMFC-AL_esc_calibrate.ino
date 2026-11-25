@@ -233,6 +233,16 @@ void loop(){
   if(data == 'a'){
 
     if(cal_int != 2000){
+      // Reinicia os acumuladores antes de uma nova calibração
+      gyro_axis_cal[1] = 0.0;
+      gyro_axis_cal[2] = 0.0;
+      gyro_axis_cal[3] = 0.0;
+  
+      // Reinicia a estimativa dos ângulos
+      angle_pitch = 0.0;
+      angle_roll = 0.0;
+      first_angle = false;
+  
       Serial.print("Calibrating the gyro");
       //Let's take multiple gyro data samples so we can determine the average gyro offset (calibration).
       for (cal_int = 0; cal_int < 2000 ; cal_int ++){                                   //Take 2000 readings for calibration.
