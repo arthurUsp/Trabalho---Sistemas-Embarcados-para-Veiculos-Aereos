@@ -233,16 +233,6 @@ void loop(){
   if(data == 'a'){
 
     if(cal_int != 2000){
-      // Reinicia os acumuladores antes de uma nova calibração
-      gyro_axis_cal[1] = 0.0;
-      gyro_axis_cal[2] = 0.0;
-      gyro_axis_cal[3] = 0.0;
-  
-      // Reinicia a estimativa dos ângulos
-      angle_pitch = 0.0;
-      angle_roll = 0.0;
-      first_angle = false;
-  
       Serial.print("Calibrating the gyro");
       //Let's take multiple gyro data samples so we can determine the average gyro offset (calibration).
       for (cal_int = 0; cal_int < 2000 ; cal_int ++){                                   //Take 2000 readings for calibration.
@@ -528,7 +518,6 @@ void gyro_signalen(){
   acc_z = acc_axis[eeprom_data[30] & 0b00000011];                //Set acc_z to the correct axis that was stored in the EEPROM.
   if(eeprom_data[30] & 0b10000000)acc_z *= -1;                   //Invert acc_z if the MSB of EEPROM bit 30 is set.
 }
-
 
 
 
