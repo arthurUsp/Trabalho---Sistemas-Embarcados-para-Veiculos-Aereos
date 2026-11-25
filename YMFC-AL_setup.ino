@@ -17,6 +17,8 @@
 
 #include <Wire.h>               //Include the Wire.h library so we can communicate with the gyro
 #include <EEPROM.h>             //Include the EEPROM.h library so we can store information onto the EEPROM
+#include <util/atomic.h>        // Include the util/atomic.h library so we can use ATOMIC_BLOCK to prevent interrupts during critical code sections
+
 
 //Declaring Global Variables
 byte last_channel_1, last_channel_2, last_channel_3, last_channel_4;
@@ -691,23 +693,85 @@ void wait_sticks_zero(){
 }
 
 //Checck if the receiver values are valid within 10 seconds
+
 void wait_for_receiver(){
-  byte zero = 0;
-  timer = millis() + 10000;
-  while(timer > millis() && zero < 15){
-    if(receiver_input_channel_1 < 2100 && receiver_input_channel_1 > 900)zero |= 0b00000001;
-    if(receiver_input_channel_2 < 2100 && receiver_input_channel_2 > 900)zero |= 0b00000010;
-    if(receiver_input_channel_3 < 2100 && receiver_input_channel_3 > 900)zero |= 0b00000100;
-    if(receiver_input_channel_4 < 2100 && receiver_input_channel_4 > 900)zero |= 0b00001000;
-    delay(500);
-    Serial.print(F("."));
-  }
-  if(zero == 0){
+
+    // Tempo máximo permitido para validar o receptor
+    const unsigned long timeout = 10000;
+
+    // Número de verificações consecutivas necessárias
+    const byte required_checks = 5;
+
+    unsigned long initial_time = millis();
+
+    byte valid_channels = 0;
+    byte consecutive_checks = 0;
+
+    int channels[4];
+
+    while(millis() - initial_time < timeout){
+
+        // Leitura atômica dos valores atualizados pela ISR
+        ATOMIC_BLOCK(ATOMIC_RESTORESTATE){
+
+            channels[0] = receiver_input_channel_1;
+            channels[1] = receiver_input_channel_2;
+            channels[2] = receiver_input_channel_3;
+            channels[3] = receiver_input_channel_4;
+        }
+
+        // Reinicia a máscara a cada verificação
+        valid_channels = 0;
+
+        // Verifica os quatro canais individualmente
+        for(byte i = 0; i < 4; i++){
+
+            if(channels[i] > 900 && channels[i] < 2100){
+
+                valid_channels |= (1 << i);
+            }
+        }
+
+        // Todos os quatro canais devem ser válidos
+        if(valid_channels == 0b00001111){
+
+            consecutive_checks++;
+        }
+        else{
+
+            consecutive_checks = 0;
+        }
+
+        // Confirma a validação após cinco verificações
+        if(consecutive_checks >= required_checks){
+
+            Serial.println(F(" Receiver channels OK!"));
+
+            return;
+        }
+
+        Serial.print(F("."));
+
+        delay(100);
+    }
+
+    // Tempo limite atingido
     error = 1;
-    Serial.println(F("."));
-    Serial.println(F("No valid receiver signals found!!! (ERROR 1)"));
-  }
-  else Serial.println(F(" OK"));
+
+    Serial.println();
+    Serial.println(F("Receiver validation failed!"));
+
+    // Identifica os canais com valores inválidos
+    for(byte i = 0; i < 4; i++){
+
+        if(!(valid_channels & (1 << i))){
+
+            Serial.print(F("Invalid channel: "));
+            Serial.println(i + 1);
+        }
+    }
+
+    Serial.println(F("ERROR 1"));
 }
 
 //Register the min and max receiver values and exit when the sticks are back in the neutral position
