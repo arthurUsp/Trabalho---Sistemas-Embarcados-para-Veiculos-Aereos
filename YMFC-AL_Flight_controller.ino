@@ -48,6 +48,16 @@ volatile int receiver_input_channel_1, receiver_input_channel_2, receiver_input_
 int counter_channel_1, counter_channel_2, counter_channel_3, counter_channel_4, loop_counter;
 int esc_1, esc_2, esc_3, esc_4;
 int throttle, battery_voltage;
+
+// Monitoramento da tensao da bateria
+// Valores em centesimos de volt (LiPo 3S)
+const int BATTERY_LOW_THRESHOLD = 1050; // Limite para ativar o alerta
+const int BATTERY_RECOVERY_THRESHOLD = 1080; //Limite para desativar o alerta
+
+// Estados dos indicadores de falha
+bool low_battery = false; // Armazena o estado do alerta de bateria
+bool timing_fault = false; // Armazena a ocorrência de falha de temporização
+
 int cal_int, start, gyro_address;
 int receiver_input[5];
 int temperature;
@@ -262,8 +272,8 @@ void loop(){
   //0.09853 = 0.08 * 1.2317.
   battery_voltage = battery_voltage * 0.92 + (analogRead(0) + 65) * 0.09853;
 
-  //Turn on the led if battery voltage is to low.
-  if(battery_voltage < 1000 && battery_voltage > 600)digitalWrite(12, HIGH);
+  // Atualiza o alerta de bateria utilizando histerese
+  update_battery_warning();
 
 
   throttle = receiver_input_channel_3;                                      //We need the throttle signal as a base signal.
@@ -312,7 +322,19 @@ void loop(){
   //the Q&A page: 
   //! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
     
-  if(micros() - loop_timer > 4050)digitalWrite(12, HIGH);                   //Turn on the LED if the loop time exceeds 4050us.
+  
+  // Atualiza o indicador combinado de falhas.
+  // Uma falha de temporizacao permanece registrada ate reiniciar.
+  digitalWrite(12, low_battery || timing_fault);
+
+  // Verifica se o tempo de processamento excedeu o limite
+  if(micros() - loop_timer > 4050){
+
+      timing_fault = true;
+
+      digitalWrite(12, HIGH);
+  }
+
   
   //All the information for controlling the motor's is available.
   //The refresh rate is 250Hz. That means the esc's need there pulse every 4ms.
@@ -548,4 +570,23 @@ void set_gyro_registers(){
     Wire.endTransmission();                                                    //End the transmission with the gyro    
 
   }  
+}
+
+
+// Atualiza o estado do alerta de bateria utilizando histerese
+void update_battery_warning(){
+
+    // Ativa o alerta quando a tensao atinge o limite inferior
+    if(battery_voltage <= BATTERY_LOW_THRESHOLD){
+
+        low_battery = true;
+    }
+
+    // Desativa o alerta somente apos atingir o limite superior
+    else if(battery_voltage >= BATTERY_RECOVERY_THRESHOLD){
+
+        low_battery = false;
+    }
+
+    // Entre os dois limites, o estado anterior e mantido
 }
