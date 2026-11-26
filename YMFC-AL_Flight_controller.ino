@@ -48,6 +48,25 @@ volatile int receiver_input_channel_1, receiver_input_channel_2, receiver_input_
 int counter_channel_1, counter_channel_2, counter_channel_3, counter_channel_4, loop_counter;
 int esc_1, esc_2, esc_3, esc_4;
 int throttle, battery_voltage;
+
+// Monitoramento da tensao da bateria
+// Valores em centesimos de volt (LiPo 3S)
+const int BATTERY_LOW_THRESHOLD = 1050; // Limite para ativar o alerta
+const int BATTERY_RECOVERY_THRESHOLD = 1080; //Limite para desativar o alerta
+
+// Estados dos indicadores de falha
+bool low_battery = false; // Armazena o estado do alerta de bateria
+bool timing_fault = false; // Armazena a ocorrência de falha de temporização
+
+// Parametros de conversao e filtragem da bateria
+const float BATTERY_ADC_GAIN = 1.2317f; // Fator de conversão da leitura analógica
+const int BATTERY_ADC_OFFSET = 65; // Compensação original associada ao diodo
+const float BATTERY_FILTER_ALPHA = 0.08f; // Peso da nova medição no filtro
+
+// Tensao filtrada com preservacao das casas decimais
+// Unidade: centesimos de volt
+float battery_voltage_filtered = 0.0f; // Armazena a estimativa da tensão com precisão fracionária
+
 int cal_int, start, gyro_address;
 int receiver_input[5];
 int temperature;
@@ -145,15 +164,20 @@ void setup(){
   }
   start = 0;                                                                //Set start back to 0.
 
-  //Load the battery voltage to the battery_voltage variable.
-  //65 is the voltage compensation for the diode.
-  //12.6V equals ~5V @ Analog 0.
-  //12.6V equals 1023 analogRead(0).
-  //1260 / 1023 = 1.2317.
-  //The variable battery_voltage holds 1050 if the battery voltage is 10.5V.
-  battery_voltage = (analogRead(0) + 65) * 1.2317;
+  
+  // Realiza a primeira leitura da tensao da bateria
+  int initial_battery_adc = analogRead(A0);
 
-  loop_timer = micros();                                                    //Set the timer for the next loop.
+  // Inicializa a variavel original utilizada na compensacao
+  battery_voltage = (initial_battery_adc + 65) * 1.2317;
+
+  // Inicializa o novo filtro diretamente com a tensao medida
+  battery_voltage_filtered =
+      (initial_battery_adc + BATTERY_ADC_OFFSET)
+      * BATTERY_ADC_GAIN;
+
+
+    loop_timer = micros();                                                    //Set the timer for the next loop.
 
   //When everything is done, turn off the led.
   digitalWrite(12,LOW);                                                     //Turn off the warning led.
@@ -257,14 +281,11 @@ void loop(){
   
   calculate_pid();                                                            //PID inputs are known. So we can calculate the pid output.
 
-  //The battery voltage is needed for compensation.
-  //A complementary filter is used to reduce noise.
-  //0.09853 = 0.08 * 1.2317.
-  battery_voltage = battery_voltage * 0.92 + (analogRead(0) + 65) * 0.09853;
+  // Atualiza a medicao e a filtragem da tensao da bateria
+  update_battery_voltage();
 
-  //Turn on the led if battery voltage is to low.
-  if(battery_voltage < 1000 && battery_voltage > 600)digitalWrite(12, HIGH);
-
+  // Atualiza o alerta de bateria utilizando histerese
+  update_battery_warning();
 
   throttle = receiver_input_channel_3;                                      //We need the throttle signal as a base signal.
 
@@ -312,7 +333,19 @@ void loop(){
   //the Q&A page: 
   //! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
     
-  if(micros() - loop_timer > 4050)digitalWrite(12, HIGH);                   //Turn on the LED if the loop time exceeds 4050us.
+  
+  // Atualiza o indicador combinado de falhas.
+  // Uma falha de temporizacao permanece registrada ate reiniciar.
+  digitalWrite(12, low_battery || timing_fault);
+
+  // Verifica se o tempo de processamento excedeu o limite
+  if(micros() - loop_timer > 4050){
+
+      timing_fault = true;
+
+      digitalWrite(12, HIGH);
+  }
+
   
   //All the information for controlling the motor's is available.
   //The refresh rate is 250Hz. That means the esc's need there pulse every 4ms.
@@ -549,3 +582,52 @@ void set_gyro_registers(){
 
   }  
 }
+
+
+
+// Atualiza o estado do alerta de bateria utilizando histerese
+void update_battery_warning(){
+
+    // Ativa o alerta quando a tensao filtrada
+    // atinge o limite inferior
+    if(battery_voltage_filtered <= BATTERY_LOW_THRESHOLD){
+
+        low_battery = true;
+    }
+
+    // Desativa o alerta somente apos a tensao
+    // filtrada atingir o limite superior
+    else if(battery_voltage_filtered >= BATTERY_RECOVERY_THRESHOLD){
+
+        low_battery = false;
+    }
+
+    // Entre os dois limites, o estado anterior e mantido
+}
+
+
+
+// Realiza a leitura e a filtragem digital da bateria
+void update_battery_voltage(){
+
+    // Uma unica leitura do conversor analogico-digital
+    int battery_adc = analogRead(A0);
+
+    // Preserva o filtro original utilizado na compensacao
+    // da tensao aplicada aos motores
+    battery_voltage =
+        battery_voltage * 0.92
+        + (battery_adc + 65) * 0.09853;
+
+    // Converte a leitura do ADC para centesimos de volt
+    float measured_voltage =
+        (battery_adc + BATTERY_ADC_OFFSET)
+        * BATTERY_ADC_GAIN;
+
+    // Filtro passa-baixas digital de primeira ordem
+    // Preserva as casas decimais entre as iteracoes
+    battery_voltage_filtered +=
+        BATTERY_FILTER_ALPHA *
+        (measured_voltage - battery_voltage_filtered);
+}
+

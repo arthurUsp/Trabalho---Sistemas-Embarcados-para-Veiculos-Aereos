@@ -17,6 +17,8 @@
 
 #include <Wire.h>               //Include the Wire.h library so we can communicate with the gyro
 #include <EEPROM.h>             //Include the EEPROM.h library so we can store information onto the EEPROM
+#include <util/atomic.h>        // Include the util/atomic.h library so we can use ATOMIC_BLOCK to prevent interrupts during critical code sections
+
 
 //Declaring Global Variables
 byte last_channel_1, last_channel_2, last_channel_3, last_channel_4;
@@ -25,6 +27,16 @@ byte channel_1_assign, channel_2_assign, channel_3_assign, channel_4_assign;
 byte roll_axis, pitch_axis, yaw_axis;
 byte receiver_check_byte, gyro_check_byte;
 volatile int receiver_input_channel_1, receiver_input_channel_2, receiver_input_channel_3, receiver_input_channel_4;
+
+// Instante de recebimento do ultimo pulso de cada canal
+volatile unsigned long last_pulse_time[4] = {0, 0, 0, 0};
+
+// Indica quais canais ja receberam pelo menos um pulso
+volatile byte received_channels = 0;
+
+// Tempo maximo sem receber um novo pulso (100 ms)
+const unsigned long RECEIVER_TIMEOUT_US = 100000UL;
+
 int center_channel_1, center_channel_2, center_channel_3, center_channel_4;
 int high_channel_1, high_channel_2, high_channel_3, high_channel_4;
 int low_channel_1, low_channel_2, low_channel_3, low_channel_4;
@@ -691,24 +703,122 @@ void wait_sticks_zero(){
 }
 
 //Checck if the receiver values are valid within 10 seconds
+
+
 void wait_for_receiver(){
-  byte zero = 0;
-  timer = millis() + 10000;
-  while(timer > millis() && zero < 15){
-    if(receiver_input_channel_1 < 2100 && receiver_input_channel_1 > 900)zero |= 0b00000001;
-    if(receiver_input_channel_2 < 2100 && receiver_input_channel_2 > 900)zero |= 0b00000010;
-    if(receiver_input_channel_3 < 2100 && receiver_input_channel_3 > 900)zero |= 0b00000100;
-    if(receiver_input_channel_4 < 2100 && receiver_input_channel_4 > 900)zero |= 0b00001000;
-    delay(500);
-    Serial.print(F("."));
-  }
-  if(zero == 0){
+
+    const unsigned long timeout = 10000;
+    const byte required_checks = 5;
+
+    unsigned long initial_time = millis();
+
+    byte valid_channels = 0;
+    byte consecutive_checks = 0;
+    byte received_mask = 0;
+
+    int channels[4];
+
+    unsigned long pulse_times[4];
+    unsigned long now;
+
+    while(millis() - initial_time < timeout){
+
+        // Leitura atomica das informacoes da ISR
+        ATOMIC_BLOCK(ATOMIC_RESTORESTATE){
+
+            channels[0] = receiver_input_channel_1;
+            channels[1] = receiver_input_channel_2;
+            channels[2] = receiver_input_channel_3;
+            channels[3] = receiver_input_channel_4;
+
+            for(byte i = 0; i < 4; i++){
+
+                pulse_times[i] = last_pulse_time[i];
+            }
+
+            received_mask = received_channels;
+            now = micros();
+        }
+
+        // Reinicia a mascara de validacao
+        valid_channels = 0;
+
+        for(byte i = 0; i < 4; i++){
+
+            // Verifica se a duracao do pulso e valida
+            bool valid_width =
+                channels[i] > 900 &&
+                channels[i] < 2100;
+
+            // Verifica se o canal ja recebeu um pulso
+            bool pulse_received =
+                (received_mask & (1 << i)) != 0;
+
+            // Verifica se o pulso recebido e recente
+            bool recent_pulse =
+                (now - pulse_times[i]) < RECEIVER_TIMEOUT_US;
+
+            // O canal deve satisfazer as tres condicoes
+            if(valid_width && pulse_received && recent_pulse){
+
+                valid_channels |= (1 << i);
+            }
+        }
+
+        // Verifica se todos os canais estao validos
+        if(valid_channels == B00001111){
+
+            consecutive_checks++;
+        }
+        else{
+
+            consecutive_checks = 0;
+        }
+
+        // Confirma apos cinco verificacoes consecutivas
+        if(consecutive_checks >= required_checks){
+
+            Serial.println(F(" Receiver channels OK!"));
+
+            return;
+        }
+
+        Serial.print(F("."));
+        delay(100);
+    }
+
+    // Tempo limite atingido
     error = 1;
-    Serial.println(F("."));
-    Serial.println(F("No valid receiver signals found!!! (ERROR 1)"));
-  }
-  else Serial.println(F(" OK"));
+
+    Serial.println();
+    Serial.println(F("Receiver validation failed!"));
+
+    for(byte i = 0; i < 4; i++){
+
+        if(!(valid_channels & (1 << i))){
+
+            Serial.print(F("Invalid channel: "));
+            Serial.println(i + 1);
+
+            if(!(received_mask & (1 << i))){
+
+                Serial.println(F("No pulse received."));
+            }
+            else if((now - pulse_times[i]) >= RECEIVER_TIMEOUT_US){
+
+                Serial.println(F("Receiver signal timeout."));
+            }
+            else{
+
+                Serial.println(F("Invalid pulse width."));
+            }
+        }
+    }
+
+    Serial.println(F("ERROR 1"));
 }
+
+
 
 //Register the min and max receiver values and exit when the sticks are back in the neutral position
 void register_min_max(){
@@ -790,54 +900,97 @@ void check_gyro_axes(byte movement){
 }
 
 //This routine is called every time input 8, 9, 10 or 11 changed state
-ISR(PCINT0_vect){
-  current_time = micros();
-  //Channel 1=========================================
-  if(PINB & B00000001){                                        //Is input 8 high?
-    if(last_channel_1 == 0){                                   //Input 8 changed from 0 to 1
-      last_channel_1 = 1;                                      //Remember current input state
-      timer_1 = current_time;                                  //Set timer_1 to current_time
-    }
-  }
-  else if(last_channel_1 == 1){                                //Input 8 is not high and changed from 1 to 0
-    last_channel_1 = 0;                                        //Remember current input state
-    receiver_input_channel_1 = current_time - timer_1;         //Channel 1 is current_time - timer_1
-  }
-  //Channel 2=========================================
-  if(PINB & B00000010 ){                                       //Is input 9 high?
-    if(last_channel_2 == 0){                                   //Input 9 changed from 0 to 1
-      last_channel_2 = 1;                                      //Remember current input state
-      timer_2 = current_time;                                  //Set timer_2 to current_time
-    }
-  }
-  else if(last_channel_2 == 1){                                //Input 9 is not high and changed from 1 to 0
-    last_channel_2 = 0;                                        //Remember current input state
-    receiver_input_channel_2 = current_time - timer_2;         //Channel 2 is current_time - timer_2
-  }
-  //Channel 3=========================================
-  if(PINB & B00000100 ){                                       //Is input 10 high?
-    if(last_channel_3 == 0){                                   //Input 10 changed from 0 to 1
-      last_channel_3 = 1;                                      //Remember current input state
-      timer_3 = current_time;                                  //Set timer_3 to current_time
-    }
-  }
-  else if(last_channel_3 == 1){                                //Input 10 is not high and changed from 1 to 0
-    last_channel_3 = 0;                                        //Remember current input state
-    receiver_input_channel_3 = current_time - timer_3;         //Channel 3 is current_time - timer_3
 
-  }
-  //Channel 4=========================================
-  if(PINB & B00001000 ){                                       //Is input 11 high?
-    if(last_channel_4 == 0){                                   //Input 11 changed from 0 to 1
-      last_channel_4 = 1;                                      //Remember current input state
-      timer_4 = current_time;                                  //Set timer_4 to current_time
+ISR(PCINT0_vect){
+
+    current_time = micros();
+
+    // CANAL 1 - Pino digital 8
+    if(PINB & B00000001){
+
+        if(last_channel_1 == 0){
+
+            last_channel_1 = 1;
+            timer_1 = current_time;
+        }
     }
-  }
-  else if(last_channel_4 == 1){                                //Input 11 is not high and changed from 1 to 0
-    last_channel_4 = 0;                                        //Remember current input state
-    receiver_input_channel_4 = current_time - timer_4;         //Channel 4 is current_time - timer_4
-  }
+    else if(last_channel_1 == 1){
+
+        last_channel_1 = 0;
+
+        unsigned long pulse = current_time - timer_1;
+
+        // Evita overflow na conversao para int
+        receiver_input_channel_1 = (pulse <= 32767UL) ? pulse : 0;
+
+        last_pulse_time[0] = current_time;
+        received_channels |= B00000001;
+    }
+
+    // CANAL 2 - Pino digital 9
+    if(PINB & B00000010){
+
+        if(last_channel_2 == 0){
+
+            last_channel_2 = 1;
+            timer_2 = current_time;
+        }
+    }
+    else if(last_channel_2 == 1){
+
+        last_channel_2 = 0;
+
+        unsigned long pulse = current_time - timer_2;
+
+        receiver_input_channel_2 = (pulse <= 32767UL) ? pulse : 0;
+
+        last_pulse_time[1] = current_time;
+        received_channels |= B00000010;
+    }
+
+    // CANAL 3 - Pino digital 10
+    if(PINB & B00000100){
+
+        if(last_channel_3 == 0){
+
+            last_channel_3 = 1;
+            timer_3 = current_time;
+        }
+    }
+    else if(last_channel_3 == 1){
+
+        last_channel_3 = 0;
+
+        unsigned long pulse = current_time - timer_3;
+
+        receiver_input_channel_3 = (pulse <= 32767UL) ? pulse : 0;
+
+        last_pulse_time[2] = current_time;
+        received_channels |= B00000100;
+    }
+
+    // CANAL 4 - Pino digital 11
+    if(PINB & B00001000){
+
+        if(last_channel_4 == 0){
+
+            last_channel_4 = 1;
+            timer_4 = current_time;
+        }
+    }
+    else if(last_channel_4 == 1){
+
+        last_channel_4 = 0;
+
+        unsigned long pulse = current_time - timer_4;
+
+        receiver_input_channel_4 = (pulse <= 32767UL) ? pulse : 0;
+
+        last_pulse_time[3] = current_time;
+        received_channels |= B00001000;
+    }
 }
+
 
 //Intro subroutine
 void intro(){
