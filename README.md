@@ -629,3 +629,100 @@ os motores desconectados nos testes de tensão.
   bateria com histerese;
 - `ef596c9`: aprimoramento da precisão do filtro
   digital da bateria.
+
+---
+
+## Contribuição AO — Recalibração do giroscópio
+
+**Responsável:** Ana Carolina Saggioratto Osello - 13683104
+
+**Branch:** `fix/gyro-calibration`
+
+**Arquivos modificados:** `YMFC-AL_esc_calibrate.ino` e `README.md`.
+
+### 1. Problema identificado
+
+No programa de calibração dos ESCs, o comando `a` do monitor serial
+inicia a calibração do giroscópio e a exibição dos ângulos. O programa
+soma 2000 amostras de cada eixo e divide os totais por 2000 para
+estimar os offsets, isto é, a leitura do giroscópio em repouso.
+
+Ao receber outro comando, `cal_int` volta a zero. Entretanto, os
+valores de `gyro_axis_cal[1]`, `[2]` e `[3]` mantêm os offsets calculados
+anteriormente. Assim, um novo comando `a` acumula as novas amostras
+sobre os offsets anteriores, contaminando a nova média.
+
+Para cada eixo, o cálculo incorreto equivale a:
+
+$$
+b_{novo} = \frac{b_{anterior} + \sum_{i=1}^{2000} x_i}{2000}
+$$
+
+O resultado deve depender apenas das amostras da calibração atual:
+
+$$
+b_{novo} = \frac{\sum_{i=1}^{2000} x_i}{2000}
+$$
+
+### 2. Alteração implementada
+
+Antes do laço de aquisição de uma nova calibração:
+
+- Os três acumuladores `gyro_axis_cal[1..3]` são zerados;
+- As estimativas `angle_pitch` e `angle_roll` são zeradas;
+- A flag `first_angle` recebe `false`, para que a primeira estimativa
+  após a calibração seja inicializada a partir do acelerômetro.
+
+O laço começa com `cal_int = 0`, permitindo adquirir as amostras brutas
+sem descontar o offset anterior. A compensação continua sendo aplicada
+por `gyro_signalen()` somente quando `cal_int == 2000`, após o cálculo
+da média. Foram mantidas as 2000 amostras e os pulsos de 1000 µs
+enviados aos ESCs durante a calibração.
+
+### 3. Compilação e conferência numérica
+
+Em 26/11/2026, o sketch foi compilado separadamente para Arduino Uno
+(ATmega328P, FQBN `arduino:avr:uno`), com Arduino CLI 1.6.0 e
+Arduino AVR Boards 1.8.8. Tanto a versão de referência da `develop`
+(`e7f1245`) quanto a versão corrigida compilaram com sucesso.
+
+| Recurso | Referência da develop | Versão corrigida |
+|---|---:|---:|
+| Flash utilizada | 13042 bytes | 13126 bytes |
+| SRAM global utilizada | 1106 bytes | 1106 bytes |
+| SRAM restante para variáveis locais | 942 bytes | 942 bytes |
+
+A diferença foi de 84 bytes de Flash, sem aumento de SRAM global.
+Para reproduzir a compilação no Arduino IDE, copiar somente
+`YMFC-AL_esc_calibrate.ino` para uma pasta chamada
+`YMFC-AL_esc_calibrate`, selecionar Arduino Uno e usar Verificar.
+Os três arquivos `.ino` do repositório são programas independentes
+e devem ser compilados em pastas separadas.
+
+Uma simulação numérica em Python, com operações em ponto flutuante
+de 32 bits, conferiu primeira calibração, repetição, mudança de offsets
+e entrada zero. Por exemplo, para amostras constantes de 100, -200 e
+50 unidades nos três eixos, repetir a calibração sem zerar os
+acumuladores resulta em aproximadamente 100,05, -200,10 e 50,025.
+Com a reinicialização, as médias voltam a ser 100, -200 e 50.
+Essa simulação verifica o cálculo da média; não executa o sketch nem
+simula o sensor, as interrupções ou os pulsos dos ESCs.
+
+### 4. Validação de bancada proposta
+
+Os testes em hardware permanecem pendentes. Com as hélices removidas,
+o setup previamente gravado na EEPROM e o conjunto imóvel:
+
+1. Carregar o sketch de calibração dos ESCs e abrir o monitor serial
+   em 57600 baud, mantendo o acelerador na posição mínima.
+2. Enviar `a`, aguardar a calibração e observar os ângulos e a
+   velocidade de yaw em repouso.
+3. Enviar novamente `a`, sem reiniciar a placa. A nova calibração
+   deve usar apenas as novas amostras e reinicializar os ângulos.
+4. Enviar `r` e depois `a`, verificando também a troca de modo.
+5. Repetir o procedimento algumas vezes e comparar as leituras em
+   repouso, considerando o ruído e a variação térmica do sensor.
+
+A correção elimina a reutilização dos offsets como soma inicial.
+Ela não detecta movimento durante a calibração nem falhas de comunicação
+I²C; o conjunto deve permanecer imóvel durante a aquisição.
